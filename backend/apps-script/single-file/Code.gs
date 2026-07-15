@@ -3,7 +3,7 @@
  * Apps Script loads every .gs file in this directory as one project.
  */
 
-const MIST_OS_VERSION = "3.0.1";
+const MIST_OS_VERSION = "3.0.0";
 const SCHEMA_VERSION = "MIST-OS-3";
 const ORDER_PREFIX = "MIST";
 const DUPLICATE_WINDOW_MINUTES = 30;
@@ -353,17 +353,12 @@ function setupMistOS() {
     properties.setProperty(ADMIN_KEY_PROPERTY, adminKey);
   }
 
-  // Install an authorized edit trigger. A simple onEdit trigger cannot call
-  // services such as SpreadsheetApp.openById(), which MIST OS uses internally.
-  installMistEditTrigger();
-
   SpreadsheetApp.flush();
   return {
     ok: true,
     version: MIST_OS_VERSION,
     schema: SCHEMA_VERSION,
     adminKey,
-    editTriggerInstalled: hasMistEditTrigger_(),
     sheets: Object.values(SHEETS)
   };
 }
@@ -523,7 +518,6 @@ function onOpen() {
     .addItem("Run setup / repair schema", "setupMistOS")
     .addItem("Run system check", "showSystemCheck")
     .addItem("Show admin key", "showAdminKey")
-    .addItem("Install / repair edit trigger", "installMistEditTrigger")
     .addItem("Refresh dashboard", "rebuildDashboardSheet")
     .addToUi();
 }
@@ -868,96 +862,8 @@ function adminInventoryResponse_() {
   };
 }
 
-/**
- * Parses inventory values defensively. Blank, formatted, or malformed values
- * become zero instead of producing NaN.
- */
-function parseInventoryNumber_(value) {
-  const parsed = parseNumber_(value, 0);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : 0;
-}
-
-/**
- * Recalculates Available = Stock - Reserved for every inventory row.
- * Run this once after replacing Code.gs to repair stale Available values.
- */
-function recalculateAllInventory() {
-  const spreadsheet = getSpreadsheet_();
-  const sheet = spreadsheet.getSheetByName(SHEETS.INVENTORY);
-  if (!sheet) throw new Error("Inventory sheet was not found.");
-
-  const lastRow = sheet.getLastRow();
-  if (lastRow < 2) return "No inventory rows found.";
-
-  const headers = currentHeaders_(sheet);
-  const stockColumn = findHeaderIndex_(headers, "Stock") + 1;
-  const reservedColumn = findHeaderIndex_(headers, "Reserved") + 1;
-  const availableColumn = findHeaderIndex_(headers, "Available") + 1;
-  const skuColumn = findHeaderIndex_(headers, "SKU") + 1;
-
-  if (!stockColumn || !reservedColumn || !availableColumn || !skuColumn) {
-    throw new Error("Inventory headers are incomplete.");
-  }
-
-  const rowCount = lastRow - 1;
-  const skuValues = sheet.getRange(2, skuColumn, rowCount, 1).getDisplayValues();
-  const stockValues = sheet.getRange(2, stockColumn, rowCount, 1).getValues();
-  const reservedValues = sheet.getRange(2, reservedColumn, rowCount, 1).getValues();
-
-  const availableValues = skuValues.map((skuRow, index) => {
-    const sku = String(skuRow[0] || "").trim();
-    if (!sku) return [""];
-
-    const stock = Math.floor(parseInventoryNumber_(stockValues[index][0]));
-    const reserved = Math.floor(parseInventoryNumber_(reservedValues[index][0]));
-
-    if (reserved > stock) {
-      throw new Error(
-        "Reserved stock is greater than Stock for " + sku +
-        ". Fix Stock or cancel/release the reservation first."
-      );
-    }
-
-    return [stock - reserved];
-  });
-
-  sheet.getRange(2, availableColumn, rowCount, 1).setValues(availableValues);
-  SpreadsheetApp.flush();
-  return rowCount + " inventory row(s) recalculated.";
-}
-
-/**
- * Installs the authorized spreadsheet edit trigger used by MIST OS.
- * Run this once manually if setupMistOS() was completed before this fix.
- */
-function installMistEditTrigger() {
-  const spreadsheet = SpreadsheetApp.getActiveSpreadsheet() || getSpreadsheet_();
-  if (!spreadsheet) throw new Error("No spreadsheet is configured.");
-
-  const handlerName = "handleMistEdit";
-  ScriptApp.getProjectTriggers().forEach(trigger => {
-    if (trigger.getHandlerFunction() === handlerName) {
-      ScriptApp.deleteTrigger(trigger);
-    }
-  });
-
-  ScriptApp.newTrigger(handlerName)
-    .forSpreadsheet(spreadsheet)
-    .onEdit()
-    .create();
-
-  return "MIST OS edit trigger installed for: " + spreadsheet.getName();
-}
-
-function hasMistEditTrigger_() {
-  return ScriptApp.getProjectTriggers().some(
-    trigger => trigger.getHandlerFunction() === "handleMistEdit"
-  );
-}
-
-function handleMistEdit(event) {
+function onEdit(event) {
   if (!event || !event.range) return;
-
   const sheet = event.range.getSheet();
   const sheetName = sheet.getName();
 
@@ -967,57 +873,18 @@ function handleMistEdit(event) {
     const reservedColumn = findHeaderIndex_(headers, "Reserved") + 1;
     const availableColumn = findHeaderIndex_(headers, "Available") + 1;
     const skuColumn = findHeaderIndex_(headers, "SKU") + 1;
-
-    const editedStartColumn = event.range.getColumn();
-    const editedEndColumn = editedStartColumn + event.range.getNumColumns() - 1;
-    const touchesReserved = reservedColumn >= editedStartColumn && reservedColumn <= editedEndColumn;
-    const touchesAvailable = availableColumn >= editedStartColumn && availableColumn <= editedEndColumn;
-    const touchesStock = stockColumn >= editedStartColumn && stockColumn <= editedEndColumn;
-
-    if (touchesReserved || touchesAvailable) {
-      event.source.toast(
-        "Reserved and Available are managed automatically. Edit Stock only.",
-        "MIST OS",
-        7
-      );
-      recalculateAllInventory();
+    if (event.range.getColumn() === reservedColumn || event.range.getColumn() === availableColumn) {
+      event.range.setValue(typeof event.oldValue === "undefined" ? 0 : event.oldValue);
+      event.source.toast("Reserved and Available are managed automatically. Edit Stock only.", "MIST OS", 7);
       return;
     }
-
-    if (touchesStock) {
+    if (event.range.getColumn() === stockColumn) {
       try {
-        const startRow = event.range.getRow();
-        const rowCount = event.range.getNumRows();
-        const skuValues = sheet.getRange(startRow, skuColumn, rowCount, 1).getDisplayValues();
-        const stockValues = sheet.getRange(startRow, stockColumn, rowCount, 1).getValues();
-        const reservedValues = sheet.getRange(startRow, reservedColumn, rowCount, 1).getValues();
-
-        const availableValues = [];
-
-        for (let index = 0; index < rowCount; index += 1) {
-          const sku = String(skuValues[index][0] || "").trim();
-          if (!sku) {
-            availableValues.push([""]);
-            continue;
-          }
-
-          const stock = Math.floor(parseInventoryNumber_(stockValues[index][0]));
-          const reserved = Math.floor(parseInventoryNumber_(reservedValues[index][0]));
-
-          if (stock < reserved) {
-            throw new Error(
-              "Stock cannot be lower than Reserved for " + sku +
-              " (Reserved: " + reserved + ")."
-            );
-          }
-
-          availableValues.push([stock - reserved]);
-        }
-
-        sheet.getRange(startRow, availableColumn, rowCount, 1).setValues(availableValues);
-        SpreadsheetApp.flush();
+        const sku = sheet.getRange(event.range.getRow(), skuColumn).getDisplayValue();
+        updateStock_(sku, event.value);
       } catch (error) {
-        event.source.toast(errorMessage_(error), "MIST OS inventory", 9);
+        event.range.setValue(typeof event.oldValue === "undefined" ? 0 : event.oldValue);
+        event.source.toast(errorMessage_(error), "MIST OS inventory", 8);
       }
       return;
     }
@@ -1027,10 +894,8 @@ function handleMistEdit(event) {
     const headers = currentHeaders_(sheet);
     const statusColumn = findHeaderIndex_(headers, "Status") + 1;
     if (event.range.getColumn() !== statusColumn) return;
-
     const orderNumberColumn = findHeaderIndex_(headers, "Order Number") + 1;
     const orderNumber = sheet.getRange(event.range.getRow(), orderNumberColumn).getDisplayValue();
-
     try {
       updateOrderStatus_(orderNumber, event.value, event.oldValue || "New", true);
     } catch (error) {

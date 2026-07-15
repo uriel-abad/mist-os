@@ -28,3 +28,8 @@ A separate, deployment-ready repository for the MIST storefront, admin portal, G
 - Mobile navigation and navbar-aware anchor scrolling
 
 Start with `docs/DEPLOYMENT.md`.
+
+
+## Frontend configuration fix
+
+Runtime website settings no longer modify the frozen `MIST.config` object. Dynamic values such as the Messenger username are stored in application state, preventing the browser error `Cannot assign to read only property`.

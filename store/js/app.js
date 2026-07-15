@@ -1,7 +1,12 @@
 "use strict";
 window.MIST = window.MIST || {};
 MIST.app = (() => {
-  const state = { products: [], productsById: new Map(), selections: {} };
+  const state = {
+    products: [],
+    productsById: new Map(),
+    selections: {},
+    messengerUsername: String(MIST.config.messengerUsername || "").replace(/^@/, ""),
+  };
 
   function applySettings(settings) {
     const values = settings || {};
@@ -11,7 +16,9 @@ MIST.app = (() => {
       ["header .logo", "store_name"], ["footer .footer-brand .logo", "store_name"]
     ];
     textMap.forEach(([selector, key]) => { const element = document.querySelector(selector); if (element && values[key]) element.textContent = values[key]; });
-    if (values.messenger_username) MIST.config.messengerUsername = String(values.messenger_username).replace(/^@/, "");
+    if (values.messenger_username) {
+      state.messengerUsername = String(values.messenger_username).replace(/^@/, "");
+    }
     const instagram = String(values.instagram_username || "").replace(/^@/, "");
     const link = document.getElementById("instagram-link");
     if (link && instagram) link.href = `https://www.instagram.com/${encodeURIComponent(instagram)}/`;
@@ -88,7 +95,7 @@ MIST.app = (() => {
   async function sendOrder() {
     const button = MIST.ui.elements.submitButton;
     if (!validateForm() || MIST.cart.isEmpty()) return;
-    const username = String(MIST.config.messengerUsername || "").trim().replace(/^@/, "");
+    const username = String(state.messengerUsername || "").trim().replace(/^@/, "");
     if (!username) return MIST.ui.showToast("Messenger username is missing.");
     const originalText = button.textContent;
     MIST.ui.setSubmitting(true, "Creating order number…");
@@ -135,7 +142,7 @@ MIST.app = (() => {
       const response = await MIST.api.getCatalog(); applySettings(response.settings); prepareProducts(response.products);
       MIST.ui.renderProducts(state.products, state.selections); MIST.cart.initialize(state.products);
       if (response.source === "fallback") MIST.ui.setCatalogStatus("Live catalog unavailable. Showing the local backup catalog.", "error");
-      const username = String(MIST.config.messengerUsername || "").replace(/^@/, "");
+      const username = String(state.messengerUsername || "").replace(/^@/, "");
       if (username) { MIST.ui.elements.helpMessengerLink.href = messengerUrl(username); MIST.ui.elements.helpMessengerLink.target = "_blank"; MIST.ui.elements.helpMessengerLink.rel = "noopener noreferrer"; }
     } catch (error) { console.error(error); MIST.ui.renderLoadError(error.message); }
   }
